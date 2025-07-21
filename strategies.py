@@ -144,7 +144,8 @@ class SafeStrategy(Strategy):
             'action': action,
             'comment': f"{self.NAME}: {comment}",
             'sl_offset': sl_pips,
-            'tp_offset': tp_pips
+            'tp_offset': tp_pips,
+            'risk_percentage': self.settings.general.risk_percentage
         }
 
 class ModerateStrategy(Strategy):

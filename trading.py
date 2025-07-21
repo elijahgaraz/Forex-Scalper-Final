@@ -1579,92 +1579,91 @@ class Trader:
     def place_market_order(
         self,
         symbol_name: str,
-        volume_lots: float,
-        side: str, # "BUY" or "SELL"
+        side: str,  # "BUY" or "SELL"
+        risk_percentage: float,
+        stop_loss_pips: float,
         take_profit_pips: Optional[float] = None,
-        stop_loss_pips: Optional[float] = None,
         client_msg_id: Optional[str] = None
-    ) -> Tuple[bool, str]: # Returns (success_flag, message_or_order_id)
-        """
-        Places a market order on the Spotware platform.
-        """
+    ) -> Tuple[bool, str]:
         if not self.is_connected or not self._client or not self._is_client_connected:
             return False, "Not connected to the trading platform."
 
-        if not self.ctid_trader_account_id:
-            return False, "Account ID not set."
+        if not self.ctid_trader_account_id or self.balance is None:
+            return False, "Account information not available."
 
         symbol_id = self.symbols_map.get(symbol_name)
         if not symbol_id:
-            return False, f"Symbol '{symbol_name}' not found or not mapped."
+            return False, f"Symbol '{symbol_name}' not found."
 
-        symbol_details: Optional[ProtoOASymbol] = self.symbol_details_map.get(symbol_id)
+        symbol_details = self.symbol_details_map.get(symbol_id)
         if not symbol_details:
-            
-            print(f"Warning: Full symbol details for {symbol_name} (ID: {symbol_id}) not found. Order placement might fail or be inaccurate.")
-            
-            return False, f"Full symbol details for {symbol_name} (ID: {symbol_id}) not loaded. Cannot place order."
+            return False, f"Symbol details for '{symbol_name}' not loaded."
 
+        # Calculation of volume based on risk
+        risk_amount = self.balance * (risk_percentage / 100.0)
+        pip_value_in_account_currency = symbol_details.pipValue
 
+        # The value of one pip for one lot
+        # This needs to be adjusted based on the quote currency of the pair
+        # For simplicity, assuming the quote currency is the same as the account currency
+        # A more robust solution would require currency conversion rates
 
-        if not hasattr(symbol_details, 'lotSize') or symbol_details.lotSize == 0:
-             return False, f"lotSize not available or zero for symbol {symbol_name}. Cannot calculate volume."
+        # Let's assume pip_value_in_account_currency is for a standard lot (100,000 units)
+        # This might need adjustment based on how cTrader API provides pipValue
 
-        volume_in_units = volume_lots * symbol_details.lotSize
+        # Stop loss in account currency for one lot
+        sl_value_per_lot = stop_loss_pips * pip_value_in_account_currency
+
+        if sl_value_per_lot <= 0:
+            return False, "Stop loss value cannot be zero or negative."
+
+        volume_in_lots = risk_amount / sl_value_per_lot
         
-        volume_for_request = int(volume_in_units * 0.5)
+        # Convert lots to volume units for the request
+        volume_in_units = int(volume_in_lots * symbol_details.lotSize)
 
+        # Ensure volume is within symbol's limits
+        min_volume = symbol_details.minVolume
+        max_volume = symbol_details.maxVolume
+        step_volume = symbol_details.stepVolume
+
+        if volume_in_units < min_volume:
+            print(f"Calculated volume {volume_in_units} is less than minimum {min_volume}. Adjusting to minimum.")
+            volume_in_units = min_volume
+        elif volume_in_units > max_volume:
+            print(f"Calculated volume {volume_in_units} is greater than maximum {max_volume}. Adjusting to maximum.")
+            volume_in_units = max_volume
+
+        # Adjust volume to the nearest step
+        volume_in_units = int(round(volume_in_units / step_volume) * step_volume)
 
         req = ProtoOANewOrderReq()
         req.ctidTraderAccountId = self.ctid_trader_account_id
         req.symbolId = symbol_id
         req.orderType = ProtoOAOrderType.MARKET
-
-        if side.upper() == "BUY":
-            req.tradeSide = ProtoOATradeSide.BUY
-        elif side.upper() == "SELL":
-            req.tradeSide = ProtoOATradeSide.SELL
-        else:
-            return False, f"Invalid trade side: {side}. Must be 'BUY' or 'SELL'."
-
-        req.volume = volume_for_request
-        req.comment = f"Market Order {side} {volume_lots} lots {symbol_name}"
+        req.tradeSide = ProtoOATradeSide.BUY if side.upper() == "BUY" else ProtoOATradeSide.SELL
+        req.volume = volume_in_units
+        req.comment = f"Risk-based market order: {risk_percentage}% risk"
         
-        current_price = self.get_market_price(symbol_name) # This currently only works well for default symbol
-        if current_price is None and (take_profit_pips is not None or stop_loss_pips is not None):
-            return False, f"Cannot set SL/TP for {symbol_name} as current price is unavailable."
+        if stop_loss_pips:
+            req.relativeStopLoss = int(stop_loss_pips * (10 ** symbol_details.pipPosition))
 
-        if hasattr(symbol_details, 'pipPosition'):
-            one_pip_value = 10 ** (-symbol_details.pipPosition)
-        else:
-            if take_profit_pips is not None or stop_loss_pips is not None:
-                return False, f"pipPosition not available for symbol {symbol_name}. Cannot calculate SL/TP."
-            one_pip_value = 0  # Avoids error if SL/TP are None
+        if take_profit_pips:
+            req.relativeTakeProfit = int(take_profit_pips * (10 ** symbol_details.pipPosition))
 
-        if take_profit_pips is not None:
-            req.relativeTakeProfit = int(take_profit_pips * 10 ** symbol_details.pipPosition)
-            req.comment += f" | TP: {take_profit_pips:.2f} pips"
+        if client_msg_id:
+            req.clientOrderId = client_msg_id
 
-        if stop_loss_pips is not None:
-            req.relativeStopLoss = int(stop_loss_pips * 10 ** symbol_details.pipPosition)
-            req.comment += f" | SL: {stop_loss_pips:.2f} pips"
-
-        print(f"Sending ProtoOANewOrderReq: {req}")
         try:
             deferred = self._client.send(req)
-            
-            # Define simple callbacks for logging the send attempt
-            def order_send_success(response):
-                print(f"Market order sent successfully to server. Response: {response}")
-
-            def order_send_failure(failure):
-                print(f"Exception placing order for {symbol_name}: {failure}")
-
-            deferred.addCallbacks(order_send_success, order_send_failure)
-
-            return True, f"{side} order placed successfully."
+            # Add callbacks for logging
+            deferred.addCallbacks(
+                lambda response: print(f"Order sent successfully. Response: {response}"),
+                lambda failure: print(f"Failed to send order. Failure: {failure}")
+            )
+            return True, f"Order for {volume_in_units} units of {symbol_name} placed."
         except Exception as e:
-            return False, f"Exception placing order for {symbol_name}: {str(e)}"
+            return False, f"Exception placing order: {e}"
             
     def _handle_execution_event(self, event: ProtoOAExecutionEvent) -> None:
         # TODO: handle executions

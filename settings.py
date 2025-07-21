@@ -29,6 +29,7 @@ class GeneralSettings:
     default_symbol: str = "EUR/USD"
     chart_update_interval_ms: int = 500
     min_bars_for_trading: int = 50
+    risk_percentage: float = 1.0
     # Add other general app settings here if any
 
 @dataclass
@@ -77,7 +78,8 @@ class Settings:
         general_settings = GeneralSettings(
             default_symbol=general_cfg.get("default_symbol", "EUR/USD"),
             chart_update_interval_ms=general_cfg.get("chart_update_interval_ms", 500),
-            min_bars_for_trading=general_cfg.get("min_bars_for_trading", 50)
+            min_bars_for_trading=general_cfg.get("min_bars_for_trading", 50),
+            risk_percentage=general_cfg.get("risk_percentage", 1.0)
         )
 
         return Settings(openapi=openapi_settings, general=general_settings)
@@ -108,6 +110,7 @@ class Settings:
                 "default_symbol": self.general.default_symbol,
                 "chart_update_interval_ms": self.general.chart_update_interval_ms,
                 "min_bars_for_trading": self.general.min_bars_for_trading,
+                "risk_percentage": self.general.risk_percentage,
             }
         }
         with open(path, 'w') as f:
