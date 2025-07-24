@@ -1576,6 +1576,17 @@ class Trader:
             counts[tf_str] = len(df_history)
         return counts
 
+    def close_all_positions(self) -> None:
+        """Attempt to close all open positions on the connected account."""
+        if not USE_OPENAPI_LIB:
+            print("Mock close_all_positions called.")
+            return
+        # TODO: Implement logic using ProtoOAClosePositionReq messages
+        try:
+            print("close_all_positions not fully implemented in this example")
+        except Exception as e:
+            print(f"Error closing positions: {e}")
+
     def place_market_order(
         self,
         symbol_name: str,
