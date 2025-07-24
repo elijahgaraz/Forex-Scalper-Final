@@ -278,30 +278,35 @@ class TradingPage(ttk.Frame):
         self.sl_var = tk.DoubleVar(value=5.0)
         ttk.Entry(self, textvariable=self.sl_var).grid(row=6, column=1, sticky="ew") # Was row=5
 
+        # Batch profit target
+        ttk.Label(self, text="Batch Profit Target:").grid(row=7, column=0, sticky="w", padx=(0,5))
+        self.batch_profit_var = tk.DoubleVar(value=self.controller.settings.general.batch_profit_target)
+        ttk.Entry(self, textvariable=self.batch_profit_var).grid(row=7, column=1, sticky="ew")
+
         # Strategy selector
-        ttk.Label(self, text="Strategy:").grid(row=7, column=0, sticky="w", padx=(0,5)) # Was row=6
+        ttk.Label(self, text="Strategy:").grid(row=8, column=0, sticky="w", padx=(0,5))
         self.strategy_var = tk.StringVar(value="Safe")
         strategy_names = ["Safe", "Moderate", "Aggressive", "Momentum", "Mean Reversion"]
         cb_strat = ttk.Combobox(self, textvariable=self.strategy_var, values=strategy_names, state="readonly")
-        cb_strat.grid(row=7, column=1, sticky="ew") # Was row=6
+        cb_strat.grid(row=8, column=1, sticky="ew")
         cb_strat.bind("<<ComboboxSelected>>", lambda e: self._update_data_readiness_display(execute_now=True))
 
 
         # Data Readiness Display
-        ttk.Label(self, text="Data Readiness:").grid(row=8, column=0, sticky="w", padx=(0,5), pady=(10,0))
+        ttk.Label(self, text="Data Readiness:").grid(row=9, column=0, sticky="w", padx=(0,5), pady=(10,0))
         self.data_readiness_var = tk.StringVar(value="Initializing...")
         self.data_readiness_label = ttk.Label(self, textvariable=self.data_readiness_var)
-        self.data_readiness_label.grid(row=8, column=1, sticky="ew", pady=(10,0))
+        self.data_readiness_label.grid(row=9, column=1, sticky="ew", pady=(10,0))
 
         # Start/Stop Scalping buttons
         self.start_button = ttk.Button(self, text="Begin Scalping", command=self.start_scalping, state="normal") # Initially disabled
-        self.start_button.grid(row=9, column=0, columnspan=2, pady=(10,0)) # Adjusted row
+        self.start_button.grid(row=10, column=0, columnspan=2, pady=(10,0))
         self.stop_button  = ttk.Button(self, text="Stop Scalping", command=self.stop_scalping, state="disabled")
-        self.stop_button.grid(row=10, column=0, columnspan=2, pady=(5,0)) # Adjusted row
+        self.stop_button.grid(row=11, column=0, columnspan=2, pady=(5,0))
 
         # Session Stats frame
         stats = ttk.Labelframe(self, text="Session Stats", padding=10)
-        stats.grid(row=11, column=0, columnspan=2, sticky="ew", pady=(10,0)) # Adjusted row
+        stats.grid(row=12, column=0, columnspan=2, sticky="ew", pady=(10,0))
         stats.columnconfigure(1, weight=1)
 
         self.pnl_var       = tk.StringVar(value="0.00")
@@ -317,15 +322,18 @@ class TradingPage(ttk.Frame):
 
         # Output log
         self.output = tk.Text(self, height=8, wrap="word", state="disabled")
-        self.output.grid(row=13, column=0, columnspan=2, sticky="nsew", pady=(10,0)) # Adjusted row
+        self.output.grid(row=14, column=0, columnspan=2, sticky="nsew", pady=(10,0))
         sb = ttk.Scrollbar(self, command=self.output.yview)
-        sb.grid(row=13, column=2, sticky="ns") # Adjusted row
+        sb.grid(row=14, column=2, sticky="ns")
         self.output.config(yscrollcommand=sb.set)
 
         # Internal counters
         self.total_pnl    = 0.0
         self.total_trades = 0
         self.wins         = 0
+        self.batch_size = 5
+        self.current_batch_trades = 0
+        self.batch_start_equity = 0.0
 
         # self.refresh_price() # Removed: Price will be refreshed when symbols are populated
 
@@ -485,12 +493,18 @@ class TradingPage(ttk.Frame):
         sl     = self.sl_var.get()
         size   = self.size_var.get()
 
+        summary = self.trader.get_account_summary()
+        self.batch_start_equity = summary.get("equity", 0.0) or 0.0
+        self.current_batch_trades = 0
+
+        batch_target = self.batch_profit_var.get()
+
         self._toggle_scalping_ui(True)
 
         # Start real trading loop
         self.scalping_thread = threading.Thread(
             target=self._scalp_loop,
-            args=(symbol, tp, sl, size, strategy),
+            args=(symbol, tp, sl, size, strategy, batch_target),
             daemon=True
         )
         self.scalping_thread.start()
@@ -500,6 +514,10 @@ class TradingPage(ttk.Frame):
     def stop_scalping(self):
         if self.is_scalping:
             self._toggle_scalping_ui(False)
+            try:
+                self.trader.close_all_positions()
+            except Exception as e:
+                self._log(f"Error closing positions: {e}")
 
     def _toggle_scalping_ui(self, on: bool):
         self.is_scalping = on
@@ -508,9 +526,24 @@ class TradingPage(ttk.Frame):
         self.start_button.config(state=state_start)
         self.stop_button.config(state=state_stop)
 
-    def _scalp_loop(self, symbol: str, tp: float, sl: float, size: float, strategy):
+    def _scalp_loop(self, symbol: str, tp: float, sl: float, size: float, strategy, batch_target: float):
         print("SCALP LOOP STARTED")
         while self.is_scalping:
+            if self.current_batch_trades >= self.batch_size:
+                summary = self.trader.get_account_summary()
+                equity = summary.get("equity", 0.0) or 0.0
+                if equity - self.batch_start_equity >= batch_target:
+                    self._ui_queue.put((self._log, ("Batch profit target reached. Closing positions.",)))
+                    try:
+                        self.trader.close_all_positions()
+                    except Exception as e:
+                        self._ui_queue.put((self._log, (f"Error closing positions: {e}",)))
+                    self.batch_start_equity = equity
+                    self.current_batch_trades = 0
+                else:
+                    time.sleep(1)
+                    continue
+
             print("Fetching tick price...")
             current_tick_price = self.trader.get_market_price(symbol)
             print(f"Tick price: {current_tick_price}")
@@ -608,7 +641,10 @@ class TradingPage(ttk.Frame):
 
         if success:
             self._log(f"Order request successful: {message}")
- 
+            self.total_trades += 1
+            self.trades_var.set(str(self.total_trades))
+            self.current_batch_trades += 1
+
         else:
             self._log(f"Order request failed: {message}")
  
