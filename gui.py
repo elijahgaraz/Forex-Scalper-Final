@@ -268,10 +268,10 @@ class TradingPage(ttk.Frame):
         self.tp_var = tk.DoubleVar(value=10.0)
         ttk.Entry(self, textvariable=self.tp_var).grid(row=4, column=1, sticky="ew") # Was row=3
 
-        # Order size
-        ttk.Label(self, text="Order Size (lots):").grid(row=5, column=0, sticky="w", padx=(0,5)) # Was row=4
-        self.size_var = tk.DoubleVar(value=1.0)
-        ttk.Entry(self, textvariable=self.size_var).grid(row=5, column=1, sticky="ew") # Was row=4
+        # Risk percentage per trade
+        ttk.Label(self, text="Risk % per Trade:").grid(row=5, column=0, sticky="w", padx=(0,5)) # Was row=4
+        self.risk_var = tk.DoubleVar(value=self.controller.settings.general.risk_percentage)
+        ttk.Entry(self, textvariable=self.risk_var).grid(row=5, column=1, sticky="ew") # Was row=4
 
         # Stop-loss
         ttk.Label(self, text="Stop Loss (pips):").grid(row=6, column=0, sticky="w", padx=(0,5)) # Was row=5
@@ -491,7 +491,7 @@ class TradingPage(ttk.Frame):
         symbol = self.symbol_var.get().replace("/", "")
         tp     = self.tp_var.get()
         sl     = self.sl_var.get()
-        size   = self.size_var.get()
+        risk_pct = self.risk_var.get()
 
         summary = self.trader.get_account_summary()
         self.batch_start_equity = summary.get("equity", 0.0) or 0.0
@@ -504,7 +504,7 @@ class TradingPage(ttk.Frame):
         # Start real trading loop
         self.scalping_thread = threading.Thread(
             target=self._scalp_loop,
-            args=(symbol, tp, sl, size, strategy, batch_target),
+            args=(symbol, tp, sl, risk_pct, strategy, batch_target),
             daemon=True
         )
         self.scalping_thread.start()
@@ -526,7 +526,7 @@ class TradingPage(ttk.Frame):
         self.start_button.config(state=state_start)
         self.stop_button.config(state=state_stop)
 
-    def _scalp_loop(self, symbol: str, tp: float, sl: float, size: float, strategy, batch_target: float):
+    def _scalp_loop(self, symbol: str, tp: float, sl: float, risk_pct: float, strategy, batch_target: float):
         print("SCALP LOOP STARTED")
         while self.is_scalping:
             if self.current_batch_trades >= self.batch_size:
@@ -584,7 +584,7 @@ class TradingPage(ttk.Frame):
                     self._ui_queue.put((self._log, (f"Strategy signal: {trade_action.upper()} for {symbol}. {comment}",)))
                     self._ui_queue.put((
                         self._execute_trade,
-                        (trade_action, symbol, current_tick_price, size, tp, sl, sl_offset, tp_offset, comment)
+                        (trade_action, symbol, current_tick_price, risk_pct, tp, sl, sl_offset, tp_offset, comment)
                     ))
                 else:
                     comment = action_details.get('comment', "Strategy returned HOLD or no action.")
@@ -600,10 +600,10 @@ class TradingPage(ttk.Frame):
     def _execute_trade(self,
                        side: str,
                        symbol: str,
-                       price: float, # This is current_tick_price
-                       size: float,
-                       tp_pips_gui: float, # Original TP in pips from GUI
-                       sl_pips_gui: float, # Original SL in pips from GUI
+                       price: float,  # This is current_tick_price
+                       risk_pct: float,
+                       tp_pips_gui: float,  # Original TP in pips from GUI
+                       sl_pips_gui: float,  # Original SL in pips from GUI
                        # Parameters from strategy's decision dictionary:
                        sl_offset_strategy: float | None,
                        tp_offset_strategy: float | None,
@@ -612,8 +612,9 @@ class TradingPage(ttk.Frame):
         price_str = f"{price:.5f}" if price is not None else "N/A (unknown)"
         sl = sl_pips_gui
         tp = tp_pips_gui
-        self._log(f"{side.upper()} scalp: {symbol} at {price_str} | "
-                  f"size={size} lots | SL={sl} pips | TP={tp} pips")
+        self._log(
+            f"{side.upper()} scalp: {symbol} at {price_str} | risk={risk_pct}% | SL={sl} pips | TP={tp} pips"
+        )
 
         if price is None:
             self._log("Trade execution skipped: Market price is unavailable.")
@@ -622,7 +623,7 @@ class TradingPage(ttk.Frame):
         final_tp_pips = tp_offset_strategy if tp_offset_strategy is not None else tp_pips_gui
         final_sl_pips = sl_offset_strategy if sl_offset_strategy is not None else sl_pips_gui
 
-        self._log(f"Attempting to place market order: {side.upper()} {size} lots of {symbol} at market price.")
+        self._log(f"Attempting to place market order: {side.upper()} with {risk_pct}% risk on {symbol} at market price.")
         if final_tp_pips is not None:
             self._log(f"  with TP: {final_tp_pips} pips")
         if final_sl_pips is not None:
@@ -632,8 +633,8 @@ class TradingPage(ttk.Frame):
 
         success, message = self.trader.place_market_order(
             symbol_name=symbol,
-            volume_lots=size,
             side=side,
+            risk_percentage=risk_pct,
             take_profit_pips=final_tp_pips,
             stop_loss_pips=final_sl_pips
             # client_msg_id could be generated here if needed for GUI-specific tracking
